@@ -2,6 +2,7 @@ classDiagram
     class Owner {
         +str name
         +list~Pet~ pets
+        +int available_minutes
         +add_pet(pet) void
         +get_all_tasks() list~Task~
     }
@@ -21,17 +22,19 @@ classDiagram
         +str priority
         +str frequency
         +bool completed
+        +date due_date
         +str pet_name
         +mark_complete() void
-        +next_occurrence() date
+        +next_occurrence() date?
     }
 
     class Scheduler {
         +sort_by_time() list~Task~
         +filter_tasks(pet_name, status) list~Task~
         +detect_conflicts() list~str~
-        +generate_plan() list~Task~
-        +explain_plan() str
+        +complete_task(task) Task
+        +generate_plan(day) list~Task~
+        +explain_plan(day) str
     }
 
     Owner "1" *-- "*" Pet : has
