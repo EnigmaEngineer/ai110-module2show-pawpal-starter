@@ -50,13 +50,25 @@ Yes. After drafting the UML and turning it into class skeletons, I reviewed the 
 
 **a. How you used AI**
 
-- How did you use AI tools during this project (for example: design brainstorming, debugging, refactoring)?
-- What kinds of prompts or questions were most helpful?
+I used the AI at every stage: brainstorming the four classes and their methods, drawing the Mermaid UML, generating the class skeletons, implementing the logic, writing a terminal demo (`main.py`), writing tests, and drafting docs. What it suggested, in order:
+
+- A class brainstorm (Owner, Pet, Task, Scheduler) with attributes, methods and relationships, which it turned into a Mermaid diagram and then dataclass skeletons.
+- Implementations for sorting, filtering, conflict detection, recurring tasks, and a daily plan that fits tasks into the owner's available minutes by priority and explains its choices.
+- A test suite, and then a set of AI-written "bugs" to see whether that suite would notice them.
+
+The most helpful prompts asked the AI to critique its own work instead of producing more: "make sure the relationships make sense and you haven't included unnecessary complexity", and "do you notice any missing relationships or potential logic bottlenecks?". Those two prompts changed the design more than any request to build something.
 
 **b. Judgment and verification**
 
-- Describe one moment where you did not accept an AI suggestion as-is.
-- How did you evaluate or verify what the AI suggested?
+**What I accepted and rejected.** The first diagram was accepted as a starting point but not as final. When I asked for a complexity check, the AI cut methods nothing in the requirements needed (`remove_pet`, `remove_task`, `task_count`, `__str__`) and a redundant `Scheduler.owner` attribute. The skeleton review then found real gaps: `get_all_tasks()` returns a flat list, so tasks had lost track of their pet (fixed with `Task.pet_name`); there was no `due_date` for recurrence to work from; there was no time budget for the plan; and nothing owned the "create the next occurrence" step (fixed with `Scheduler.complete_task`). I approved those fixes. I deferred one suggestion, keeping the `Owner` in Streamlit's `st.session_state`, until `app.py` is wired up. I also stopped a `git push` the AI tried to run, because I wanted to decide when work goes to GitHub.
+
+**How I verified.** I did not take "it works" on trust:
+
+- **Running it:** I ran `main.py` in the terminal and checked the output by hand: the 08:00 clash across two pets, the 45-minute grooming task left out of a 90-minute plan, and the daily walk recreated for the next day.
+- **Adversarial review:** four independent AI reviewers hunted for bugs, and a separate verifier ran each claimed bug's repro script before it counted. Only 3 of the 16 findings were real (a Unicode-digit hole in time validation, tasks passed to `Pet(tasks=[...])` missing their pet name, and an explanation that did not match the plan's actual ordering). I fixed those and recorded the rest, such as exact-start-time conflicts only, as deliberate tradeoffs.
+- **Testing the tests:** all my first 53 tests passed, which proved little. A mutation test (the AI injected bugs into scratch copies of the code) caught only 79 of 122 injected bugs. The survivors showed real weaknesses, for example that my fixed test date happened to equal the real date, so bugs that quietly used `date.today()` went unnoticed. A second round caught 88 of 136 subtler bugs. I added tests for the survivors, moved the fixed test date, and re-checked 12 of the surviving bugs against the final suite. All 12 were caught. The suite now has 120 passing tests.
+
+**Limits.** The AI's first design had a real flaw (tasks lost their pet), and its first test suite looked stronger than it was. Both were found by asking the AI to look for faults, not by trusting its first answer. The mutation check is also only as good as the bugs the AI thought of, and I have not yet tested the Streamlit UI.
 
 ---
 

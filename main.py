@@ -5,19 +5,36 @@ from datetime import date
 from pawpal_system import Owner, Pet, Scheduler, Task
 
 
+HEADERS = ("Date", "Time", "Task", "Pet", "Min", "Priority", "Done")
+
+
 def print_tasks(title: str, tasks: list[Task]) -> None:
-    print(f"\n{title}")
-    for task in tasks:
-        print(f"  {task}")
+    """Print tasks as an aligned table under a title."""
+    if title:
+        print(f"\n{title}")
     if not tasks:
         print("  (none)")
+        return
+    rows = [
+        (f"{t.due_date:%b %d}", t.time, t.description, t.pet_name, str(t.duration), t.priority, "yes" if t.completed else "no")
+        for t in tasks
+    ]
+    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(HEADERS)]
+    # Right-align the numeric Min column; left-align the rest.
+    line = "  " + "  ".join(f"{{:{'>' if h == 'Min' else '<'}{w}}}" for h, w in zip(HEADERS, widths))
+    print(line.format(*HEADERS).rstrip())
+    print("  " + "  ".join("-" * w for w in widths))
+    for row in rows:
+        print(line.format(*row).rstrip())
 
 
 def print_todays_schedule(scheduler: Scheduler) -> None:
     today = date.today()
-    print(f"\n=== Today's Schedule ({today:%A, %B %d, %Y}) ===")
-    for task in scheduler.generate_plan(today):
-        print(f"  {task.time}  {task.description:<14} {task.pet_name:<7} {task.duration:>3} min  [{task.priority}]")
+    plan = scheduler.generate_plan(today)
+    used = sum(t.duration for t in plan)
+    print(f"\n=== Today's Schedule: {today:%A, %B %d, %Y} ===")
+    print_tasks("", plan)
+    print(f"\n  {len(plan)} tasks, {used} of {scheduler.owner.available_minutes} minutes used")
 
 
 def main() -> None:

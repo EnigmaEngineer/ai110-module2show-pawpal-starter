@@ -42,16 +42,80 @@ pip install -r requirements.txt
 6. Connect your logic to the Streamlit UI in `app.py`.
 7. Refine UML so it matches what you actually built.
 
+## Implementation Summary
+
+The scheduling logic lives in [`pawpal_system.py`](pawpal_system.py) as four classes (design in [`diagrams/uml.mmd`](diagrams/uml.mmd)):
+
+- **`Task`** is one care activity: description, `HH:MM` time, duration, priority, frequency (`once`/`daily`/`weekly`), due date and completion status. It validates its own fields and can compute its next due date.
+- **`Pet`** holds a pet's details and its list of tasks. Adding a task records the pet's name on it.
+- **`Owner`** holds several pets and the minutes available per day. `get_all_tasks()` returns every pet's tasks as one flat list, and duplicate pet names are rejected.
+- **`Scheduler`** is the brain. It takes an `Owner` and reads every task through `owner.get_all_tasks()`, never from a single pet, so it works across all pets. It can:
+  - sort tasks by date and time;
+  - filter them by pet or completion status;
+  - warn about tasks sharing a start time;
+  - complete a task, creating the next occurrence of a daily or weekly one on the right pet;
+  - build a daily plan and explain it.
+
+**How the plan is built:** pending tasks due today or earlier (overdue tasks stay in until done) are ranked by priority, then oldest due date, then earliest time. They are taken in that order until the owner's available minutes run out, and a task too long for the time left is skipped so smaller ones can still fit. The chosen tasks are then listed in time order, and `explain_plan()` says what was chosen and what was left out.
+
+**Status:** the logic layer, a terminal demo and the tests are done. `app.py` is not connected to the logic layer yet.
+
+```bash
+python main.py       # terminal demo; sample output is below
+python -m pytest     # run the test suite
+```
+
 ## 🖥️ Sample Output
 
-Paste a sample of your app's CLI or Streamlit output here so a reader can see what a generated plan looks like:
+Output from `python main.py`, which builds an owner (Sam, 90 minutes available) with two pets and five tasks, then prints today's schedule, conflict warnings, the plan explanation, and the effect of completing a recurring task:
 
 ```
-# e.g.:
-# Daily plan for Biscuit (Golden Retriever):
-#   08:00 — Morning walk (30 min) [priority: high]
-#   09:00 — Feeding (10 min) [priority: high]
-#   ...
+Owner: Sam, 90 minutes available
+
+=== Today's Schedule: Thursday, October 22, 2026 ===
+  Date    Time   Task          Pet    Min  Priority  Done
+  ------  -----  ------------  -----  ---  --------  ----
+  Oct 22  08:00  Morning walk  Buddy   30  high      no
+  Oct 22  08:00  Breakfast     Mia     10  high      no
+  Oct 22  12:30  Medication    Mia      5  high      no
+  Oct 22  18:00  Evening walk  Buddy   30  medium    no
+
+  4 tasks, 75 of 90 minutes used
+
+All tasks, sorted by time:
+  Date    Time   Task          Pet    Min  Priority  Done
+  ------  -----  ------------  -----  ---  --------  ----
+  Oct 22  08:00  Morning walk  Buddy   30  high      no
+  Oct 22  08:00  Breakfast     Mia     10  high      no
+  Oct 22  12:30  Medication    Mia      5  high      no
+  Oct 22  16:00  Grooming      Buddy   45  low       no
+  Oct 22  18:00  Evening walk  Buddy   30  medium    no
+
+Conflicts:
+  Conflict on 2026-10-22 at 08:00: Morning walk (Buddy), Breakfast (Mia)
+
+Plan for 2026-10-22: 4 task(s), 75 of 90 available minutes used.
+Tasks were chosen by priority (high first), then oldest due date (overdue first), then earliest time, until time ran out; they are listed in the order they happen.
+  [ ] 08:00 Morning walk (Buddy) - 30 min, high
+  [ ] 08:00 Breakfast (Mia) - 10 min, high
+  [ ] 12:30 Medication (Mia) - 5 min, high
+  [ ] 18:00 Evening walk (Buddy) - 30 min, medium
+Left out because they did not fit in the available time:
+  [ ] 16:00 Grooming (Buddy) - 45 min, low
+
+Completed 'Morning walk'; next occurrence due 2026-10-23
+
+Buddy's pending tasks:
+  Date    Time   Task          Pet    Min  Priority  Done
+  ------  -----  ------------  -----  ---  --------  ----
+  Oct 22  16:00  Grooming      Buddy   45  low       no
+  Oct 22  18:00  Evening walk  Buddy   30  medium    no
+  Oct 23  08:00  Morning walk  Buddy   30  high      no
+
+Completed tasks:
+  Date    Time   Task          Pet    Min  Priority  Done
+  ------  -----  ------------  -----  ---  --------  ----
+  Oct 22  08:00  Morning walk  Buddy   30  high      yes
 ```
 
 ## 🧪 Testing PawPal+

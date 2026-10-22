@@ -25,6 +25,7 @@ class Task:
     pet_name: str = ""  # set by Pet.add_task
 
     def __post_init__(self) -> None:
+        """Reject a malformed time, a non-positive duration, or an unknown priority or frequency."""
         if not TIME_PATTERN.fullmatch(self.time):
             raise ValueError(f"time must be zero-padded HH:MM, got {self.time!r}")
         if self.duration <= 0:
@@ -44,6 +45,7 @@ class Task:
         return self.due_date + timedelta(days=days) if days else None
 
     def __str__(self) -> str:
+        """Return a one-line summary: completion mark, time, description, pet, duration and priority."""
         mark = "x" if self.completed else " "
         pet = f" ({self.pet_name})" if self.pet_name else ""
         return f"[{mark}] {self.time} {self.description}{pet} - {self.duration} min, {self.priority}"
@@ -57,6 +59,7 @@ class Pet:
     tasks: list[Task] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        """Copy any tasks passed to the constructor and record this pet's name on each."""
         self.tasks = list(self.tasks)  # don't alias the caller's list
         for task in self.tasks:
             task.pet_name = self.name
@@ -86,6 +89,7 @@ class Owner:
 
 class Scheduler:
     def __init__(self, owner: Owner) -> None:
+        """Create a scheduler that reads all its tasks through the given owner."""
         self.owner = owner
 
     def sort_by_time(self) -> list[Task]:
@@ -145,6 +149,7 @@ class Scheduler:
         ]
 
         def describe(task: Task) -> str:
+            """Return the task's summary line, flagged if it was due before `day`."""
             overdue = f" (overdue since {task.due_date})" if task.due_date < day else ""
             return f"  {task}{overdue}"
 
