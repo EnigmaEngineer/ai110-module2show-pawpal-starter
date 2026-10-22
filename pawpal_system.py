@@ -39,10 +39,13 @@ class Task:
         """Mark this task as done."""
         self.completed = True
 
-    def next_occurrence(self) -> date | None:
-        """Return the next due date, or None for a one-off task."""
+    def next_occurrence(self, from_date: date | None = None) -> date | None:
+        """Return the next due date, counted from the later of due_date and from_date (default today); None for a one-off task."""
         days = FREQUENCY_DAYS.get(self.frequency)
-        return self.due_date + timedelta(days=days) if days else None
+        if not days:
+            return None
+        anchor = max(self.due_date, from_date or date.today())
+        return anchor + timedelta(days=days)
 
     def __str__(self) -> str:
         """Return a one-line summary: completion mark, time, description, pet, duration and priority."""
@@ -93,8 +96,11 @@ class Scheduler:
         self.owner = owner
 
     def sort_by_time(self) -> list[Task]:
-        """Return all tasks in chronological order (due date, then time)."""
-        return sorted(self.owner.get_all_tasks(), key=lambda t: (t.due_date, t.time))
+        """Return all tasks in chronological order (due date, then time, then priority, high first)."""
+        return sorted(
+            self.owner.get_all_tasks(),
+            key=lambda t: (t.due_date, t.time, PRIORITY_RANK.get(t.priority, 99)),
+        )
 
     def filter_tasks(self, pet_name: str | None = None, status: bool | None = None) -> list[Task]:
         """Return tasks narrowed by pet name and/or completion status (True = completed)."""
@@ -121,7 +127,7 @@ class Scheduler:
         """Mark a task complete; if it recurs, add the next occurrence to its pet and return it."""
         if task.completed:
             return None
-        next_due = task.next_occurrence()
+        next_due = task.next_occurrence(date.today())
         pet = next((p for p in self.owner.pets if p.name == task.pet_name), None)
         if next_due is not None and pet is None:
             raise ValueError(f"No pet named {task.pet_name!r} to receive the next occurrence")

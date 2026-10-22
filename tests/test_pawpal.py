@@ -2,9 +2,26 @@ from datetime import date, timedelta
 
 import pytest
 
+import pawpal_system
 from pawpal_system import Owner, Pet, Scheduler, Task
 
 TODAY = date(2026, 3, 2)  # fixed so plan tests don't depend on the real clock
+
+
+class _FrozenDate(date):
+    @classmethod
+    def today(cls):
+        return TODAY
+
+
+@pytest.fixture
+def frozen_today(monkeypatch):
+    """Make pawpal_system see TODAY as the current date.
+
+    Scheduler.complete_task has no from_date parameter; it passes date.today() to
+    Task.next_occurrence, so tests that go through it need today pinned to a fixed date.
+    """
+    monkeypatch.setattr(pawpal_system, "date", _FrozenDate)
 
 
 def make_task(description="Walk", time="08:00", duration=30, priority="medium", frequency="once", **kwargs):
@@ -38,12 +55,21 @@ def test_mark_complete_changes_status():
     [("daily", TODAY + timedelta(days=1)), ("weekly", TODAY + timedelta(days=7)), ("once", None)],
 )
 def test_next_occurrence(frequency, expected):
-    assert make_task(frequency=frequency).next_occurrence() == expected
+    assert make_task(frequency=frequency).next_occurrence(from_date=TODAY) == expected
 
 
-def test_next_occurrence_rolls_over_month_and_year():
-    task = make_task(frequency="daily", due_date=date(2026, 12, 31))
-    assert task.next_occurrence() == date(2027, 1, 1)
+@pytest.mark.parametrize(
+    "due, expected",
+    [
+        (date(2026, 1, 31), date(2026, 2, 1)),  # month boundary after a 31-day month
+        (date(2026, 4, 30), date(2026, 5, 1)),  # month boundary after a 30-day month
+        (date(2026, 12, 31), date(2027, 1, 1)),  # year boundary
+    ],
+)
+def test_next_occurrence_rolls_over_month_and_year(due, expected):
+    """A daily task whose anchor is its own due_date (from_date ≤ due_date) rolls to the 1st of the next month."""
+    task = make_task(frequency="daily", due_date=due)
+    assert task.next_occurrence(from_date=date(2026, 1, 1)) == expected
 
 
 @pytest.mark.parametrize(
@@ -218,7 +244,7 @@ def test_detect_conflicts_does_not_crash_on_empty_owner():
 
 
 @pytest.mark.parametrize("frequency, days", [("daily", 1), ("weekly", 7)])
-def test_completing_recurring_task_creates_next_occurrence(household, frequency, days):
+def test_completing_recurring_task_creates_next_occurrence(household, frozen_today, frequency, days):
     _, buddy, _, scheduler = household
     task = make_task("Walk", frequency=frequency)
     buddy.add_task(task)
@@ -330,7 +356,7 @@ def test_plan_shows_overdue_before_today_at_same_priority(household):
     assert [t.description for t in scheduler.generate_plan(TODAY)] == ["Overdue late", "Today early"]
 
 
-def test_plan_after_completing_recurring_task_moves_it_to_tomorrow(household):
+def test_plan_after_completing_recurring_task_moves_it_to_tomorrow(household, frozen_today):
     _, buddy, _, scheduler = household
     task = make_task("Walk", frequency="daily")
     buddy.add_task(task)
@@ -381,11 +407,11 @@ def test_new_task_defaults():
     assert task.due_date == date.today()
 
 
-def test_next_occurrence_does_not_change_due_date():
+def test_next_occurrence_is_repeatable_and_leaves_due_date_unchanged():
     task = make_task(frequency="daily")
-    assert task.next_occurrence() == TODAY + timedelta(days=1)
+    assert task.next_occurrence(from_date=TODAY) == TODAY + timedelta(days=1)
     assert task.due_date == TODAY
-    assert task.next_occurrence() == TODAY + timedelta(days=1)
+    assert task.next_occurrence(from_date=TODAY) == TODAY + timedelta(days=1)
 
 
 def test_task_str_shows_status_time_description_pet_duration_and_priority():
@@ -463,11 +489,26 @@ def test_detect_conflicts_message_and_order(household):
 
 
 @pytest.mark.parametrize("frequency, days", [("daily", 1), ("weekly", 7)])
-def test_follow_up_is_relative_to_the_tasks_own_due_date_not_the_clock(household, frequency, days):
-    _, buddy, _, scheduler = household
-    task = make_task("Walk", frequency=frequency, due_date=date(2020, 1, 10))
-    buddy.add_task(task)
-    assert scheduler.complete_task(task).due_date == date(2020, 1, 10 + days)
+def test_next_occurrence_early_completion(frequency, days):
+    """Completed before it was due: the next one counts from the original due date, not from today."""
+    due = TODAY + timedelta(days=8)
+    task = make_task(frequency=frequency, due_date=due)
+    assert task.next_occurrence(from_date=TODAY) == due + timedelta(days=days)
+
+
+@pytest.mark.parametrize("frequency, days", [("daily", 1), ("weekly", 7)])
+def test_next_occurrence_on_time(frequency, days):
+    """Completed on its due date: due date and completion date agree."""
+    task = make_task(frequency=frequency, due_date=TODAY)
+    assert task.next_occurrence(from_date=TODAY) == TODAY + timedelta(days=days)
+
+
+@pytest.mark.parametrize("frequency, days", [("daily", 1), ("weekly", 7)])
+def test_next_occurrence_late_completion(frequency, days):
+    """Completed after it was due: the next one counts from today, not from the missed due date."""
+    due = TODAY - timedelta(days=10)
+    task = make_task(frequency=frequency, due_date=due)
+    assert task.next_occurrence(from_date=TODAY) == TODAY + timedelta(days=days)
 
 
 def test_follow_up_goes_to_the_tasks_own_pet(household):
