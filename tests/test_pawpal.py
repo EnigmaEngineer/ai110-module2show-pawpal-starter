@@ -793,3 +793,106 @@ def test_plan_and_explanation_default_to_the_real_today(household):
     assert [t.description for t in scheduler.generate_plan()] == ["Now"]
     text = scheduler.explain_plan()
     assert f"Plan for {date.today()}" in text and "Now" in text and "Tomorrow" not in text
+
+
+# --- Leap day, overlapping durations, existing follow-up ---
+
+
+@pytest.mark.parametrize(
+    "due, expected",
+    [
+        (date(2028, 2, 28), date(2028, 2, 29)),  # leap year: Feb 29 exists
+        (date(2028, 2, 29), date(2028, 3, 1)),
+        (date(2027, 2, 28), date(2027, 3, 1)),  # non-leap year: straight to March
+    ],
+)
+def test_next_occurrence_handles_leap_day(due, expected):
+    task = make_task(frequency="daily", due_date=due)
+    assert task.next_occurrence(from_date=due) == expected
+
+
+def test_weekly_next_occurrence_lands_on_leap_day():
+    task = make_task(frequency="weekly", due_date=date(2028, 2, 22))
+    assert task.next_occurrence(from_date=date(2028, 2, 22)) == date(2028, 2, 29)
+
+
+def test_detect_conflicts_flags_overlapping_durations(household):
+    _, buddy, mia, scheduler = household
+    buddy.add_task(make_task("Long walk", "09:00", duration=60))
+    mia.add_task(make_task("Feed", "09:30", duration=10))
+    assert scheduler.detect_conflicts() == [
+        "Overlap on 2026-03-02: Long walk (Buddy) 09:00-10:00 runs into Feed (Mia) at 09:30"
+    ]
+
+
+def test_back_to_back_tasks_do_not_overlap(household):
+    _, buddy, mia, scheduler = household
+    buddy.add_task(make_task("Walk", "09:00", duration=30))
+    mia.add_task(make_task("Feed", "09:30", duration=10))
+    assert scheduler.detect_conflicts() == []
+
+
+def test_same_start_time_is_one_conflict_not_also_an_overlap(household):
+    _, buddy, mia, scheduler = household
+    buddy.add_task(make_task("Walk", "09:00", duration=60))
+    mia.add_task(make_task("Feed", "09:00", duration=10))
+    assert scheduler.detect_conflicts() == ["Conflict on 2026-03-02 at 09:00: Walk (Buddy), Feed (Mia)"]
+
+
+def test_one_long_task_overlaps_each_task_it_runs_into(household):
+    _, buddy, mia, scheduler = household
+    buddy.add_task(make_task("Groom", "09:00", duration=120))
+    mia.add_task(make_task("Feed", "09:30", duration=30))
+    mia.add_task(make_task("Meds", "10:00", duration=5))
+    warnings = scheduler.detect_conflicts()
+    assert len(warnings) == 2
+    assert "Feed" in warnings[0] and "Meds" in warnings[1]  # Feed and Meds themselves only touch
+
+
+def test_overlap_ignores_completed_tasks_and_other_dates(household):
+    _, buddy, mia, scheduler = household
+    done = make_task("Done", "09:00", duration=60)
+    done.mark_complete()
+    buddy.add_task(done)
+    buddy.add_task(make_task("Long", "09:00", duration=120, due_date=TODAY + timedelta(days=1)))
+    mia.add_task(make_task("Feed", "09:30"))
+    assert scheduler.detect_conflicts() == []
+
+
+def test_overlap_is_cut_off_at_midnight(household):
+    _, buddy, mia, scheduler = household
+    buddy.add_task(make_task("Late walk", "23:30", duration=90))
+    mia.add_task(make_task("Snack", "23:45", duration=5))
+    (warning,) = scheduler.detect_conflicts()
+    assert "23:30-24:00" in warning
+
+
+def test_completing_a_recurring_task_reuses_an_identical_pending_follow_up(household, frozen_today):
+    _, buddy, _, scheduler = household
+    task = make_task("Walk", frequency="daily")
+    existing = make_task("Walk", frequency="daily", due_date=TODAY + timedelta(days=1))
+    buddy.add_task(task)
+    buddy.add_task(existing)
+
+    follow_up = scheduler.complete_task(task)
+
+    assert follow_up is existing
+    assert len(buddy.tasks) == 2
+    assert scheduler.detect_conflicts() == []
+
+
+def test_a_completed_or_different_next_task_does_not_block_the_follow_up(household, frozen_today):
+    _, buddy, _, scheduler = household
+    task = make_task("Walk", frequency="daily")
+    tomorrow = TODAY + timedelta(days=1)
+    already_done = make_task("Walk", frequency="daily", due_date=tomorrow)
+    already_done.mark_complete()
+    other_time = make_task("Walk", "17:00", frequency="daily", due_date=tomorrow)
+    for t in (task, already_done, other_time):
+        buddy.add_task(t)
+
+    follow_up = scheduler.complete_task(task)
+
+    assert follow_up not in (already_done, other_time)
+    assert follow_up.due_date == tomorrow and follow_up.time == "08:00"
+    assert len(buddy.tasks) == 4

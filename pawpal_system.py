@@ -10,6 +10,7 @@ from datetime import date, timedelta
 
 PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}  # lower rank = more important
 FREQUENCY_DAYS = {"daily": 1, "weekly": 7}  # "once" never recurs
+MINUTES_PER_DAY = 24 * 60
 TIME_PATTERN = re.compile(r"([01]\d|2[0-3]):[0-5]\d", re.ASCII)  # ASCII: \d must not match other scripts' digits
 
 
@@ -90,6 +91,22 @@ class Owner:
         return [task for pet in self.pets for task in pet.tasks]
 
 
+def _to_minutes(time: str) -> int:
+    """Convert a validated "HH:MM" string to minutes after midnight."""
+    hours, minutes = time.split(":")
+    return int(hours) * 60 + int(minutes)
+
+
+def _format_minutes(total: int) -> str:
+    """Convert minutes after midnight back to "HH:MM"."""
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def _same_occurrence(a: Task, b: Task) -> bool:
+    """Return True if two tasks describe the same job at the same date and time."""
+    return (a.description, a.time, a.due_date, a.frequency) == (b.description, b.time, b.due_date, b.frequency)
+
+
 class Scheduler:
     def __init__(self, owner: Owner) -> None:
         """Create a scheduler that reads all its tasks through the given owner."""
@@ -112,19 +129,51 @@ class Scheduler:
         return tasks
 
     def detect_conflicts(self) -> list[str]:
-        """Return a warning for each date and time with more than one pending task."""
+        """Return a warning for each pending clash: a shared start time, or a task that starts before another ends.
+
+        Only the due date's own day is considered, so a task running past midnight is cut off at 24:00.
+        """
+        pending = [t for t in self.owner.get_all_tasks() if not t.completed]
         slots: dict[tuple[date, str], list[Task]] = {}
-        for task in self.owner.get_all_tasks():
-            if not task.completed:
-                slots.setdefault((task.due_date, task.time), []).append(task)
-        return [
-            f"Conflict on {day} at {time}: " + ", ".join(f"{t.description} ({t.pet_name})" for t in tasks)
-            for (day, time), tasks in sorted(slots.items())
+        for task in pending:
+            slots.setdefault((task.due_date, task.time), []).append(task)
+        warnings = [
+            ((day, time), f"Conflict on {day} at {time}: " + ", ".join(f"{t.description} ({t.pet_name})" for t in tasks))
+            for (day, time), tasks in slots.items()
             if len(tasks) > 1
         ]
+        for first, second in self._overlapping_pairs(pending):
+            end = _format_minutes(min(_to_minutes(first.time) + first.duration, MINUTES_PER_DAY))
+            warnings.append((
+                (first.due_date, second.time),
+                f"Overlap on {first.due_date}: {first.description} ({first.pet_name}) {first.time}-{end} "
+                f"runs into {second.description} ({second.pet_name}) at {second.time}",
+            ))
+        return [message for _, message in sorted(warnings, key=lambda w: w[0])]
+
+    @staticmethod
+    def _overlapping_pairs(tasks: list[Task]) -> list[tuple[Task, Task]]:
+        """Return (earlier, later) pairs on one day where the later starts after the earlier but before it ends."""
+        pairs = []
+        ordered = sorted(tasks, key=lambda t: (t.due_date, _to_minutes(t.time)))
+        for i, first in enumerate(ordered):
+            first_start = _to_minutes(first.time)
+            for second in ordered[i + 1:]:
+                if second.due_date != first.due_date:
+                    break
+                second_start = _to_minutes(second.time)
+                if second_start == first_start:
+                    continue  # identical start times are reported as a shared-slot conflict
+                if second_start >= first_start + first.duration:
+                    break  # sorted by start, so nothing later can overlap `first`
+                pairs.append((first, second))
+        return pairs
 
     def complete_task(self, task: Task) -> Task | None:
-        """Mark a task complete; if it recurs, add the next occurrence to its pet and return it."""
+        """Mark a task complete; if it recurs, make sure its pet has the next occurrence and return it.
+
+        If the pet already has an identical pending task on that date, that one is returned instead of adding a copy.
+        """
         if task.completed:
             return None
         next_due = task.next_occurrence(date.today())
@@ -135,6 +184,9 @@ class Scheduler:
         if next_due is None:
             return None
         follow_up = replace(task, completed=False, due_date=next_due)
+        existing = next((t for t in pet.tasks if not t.completed and _same_occurrence(t, follow_up)), None)
+        if existing is not None:
+            return existing
         pet.add_task(follow_up)
         return follow_up
 
