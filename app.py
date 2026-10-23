@@ -5,6 +5,7 @@ from pathlib import Path
 
 import streamlit as st
 
+from formatting import LEGEND, escape_markdown, summary_counts, task_icon, task_rows
 from pawpal_system import Owner, Pet, Scheduler, Task
 
 # Pets and tasks are saved here between runs. PAWPAL_DATA_FILE overrides the location (the tests use it).
@@ -12,28 +13,56 @@ DATA_FILE = Path(os.environ.get("PAWPAL_DATA_FILE") or Path(__file__).with_name(
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 
+# Everything the app remembers in st.session_state; deleting or reloading the saved data clears all of it.
+SESSION_KEYS = ("owner", "owner_name", "available_minutes", "saved", "load_notice", "disk_sig", "autosave")
+
+
+def disk_signature():
+    """Return (modified time, size) of the data file, or None if it does not exist.
+
+    Comparing it with the value from our last load or save tells us whether another window or program wrote the file.
+    """
+    try:
+        info = DATA_FILE.stat()
+    except OSError:
+        return None
+    return (info.st_mtime_ns, info.st_size)
+
+
+def quarantine(path):
+    """Move an unreadable data file aside without overwriting an earlier backup; return where it went."""
+    target = path.with_name(path.name + ".corrupt")
+    number = 1
+    while target.exists():
+        number += 1
+        target = path.with_name(f"{path.name}.corrupt{number}")
+    os.replace(path, target)
+    return target
+
+
 # Streamlit reruns this whole script on every click, so a bare `Owner(...)` here would be
 # recreated empty each time. st.session_state is a per-session dict that survives reruns:
 # load the saved Owner (or start a new one) only the first time, then reuse the stored one.
 if "owner" not in st.session_state:
     try:
-        loaded = Owner.load(DATA_FILE)
+        loaded = Owner.load_from_json(DATA_FILE)
     except ValueError as err:
         loaded = None
         try:  # keep the unreadable file instead of overwriting it with the next save
-            os.replace(DATA_FILE, DATA_FILE.with_name(DATA_FILE.name + ".corrupt"))
-            kept = f" It was kept as {DATA_FILE.name}.corrupt."
+            kept = f" It was kept as {quarantine(DATA_FILE).name}."
         except OSError:
-            kept = ""
+            kept = " It could not be moved aside, so nothing will be saved until it is fixed."
+            st.session_state.autosave = False  # never overwrite a file we could neither read nor set aside
         st.session_state.load_notice = f"Could not load {DATA_FILE.name} ({err}), so PawPal+ started empty.{kept}"
     st.session_state.owner = loaded or Owner("Jordan")
     st.session_state.saved = json.dumps(st.session_state.owner.to_dict(), sort_keys=True)  # what is on disk now
+    st.session_state.disk_sig = disk_signature()
 owner = st.session_state.owner
 scheduler = Scheduler(owner)
 
 st.title("🐾 PawPal+")
 if "load_notice" in st.session_state:
-    st.warning(st.session_state.load_notice)
+    st.warning(escape_markdown(st.session_state.load_notice))
 
 st.markdown(
     """
@@ -76,9 +105,9 @@ with st.form("add_pet_form", clear_on_submit=True):
         else:
             try:
                 owner.add_pet(Pet(pet_name.strip(), species, int(age)))
-                st.success(f"Added {pet_name.strip()}.")
+                st.success(f"Added {escape_markdown(pet_name.strip())}.")
             except ValueError as err:  # Owner.add_pet rejects a duplicate name
-                st.error(str(err))
+                st.error(escape_markdown(str(err)))
 
 pets_table = st.container()  # filled in after the Tasks section, so its task counts are never a click behind
 
@@ -109,10 +138,10 @@ else:
                     new_task = Task(description.strip(), task_time.strftime("%H:%M"), int(duration), priority, frequency)
                     before = set(scheduler.detect_conflicts())
                     pet.add_task(new_task)
-                    st.success(f"Added '{description.strip()}' for {pet.name}.")
+                    st.success(f"Added '{escape_markdown(description.strip())}' for {escape_markdown(pet.name)}.")
                     caused = [w for w in scheduler.detect_conflicts() if w not in before]  # warnings this task created
                     for warning in caused:
-                        st.warning(warning, icon="⚠️")
+                        st.warning(escape_markdown(warning), icon="⚠️")
                     if caused:
                         free = scheduler.suggest_free_time(
                             new_task.duration, new_task.due_date, earliest=new_task.time, ignore=new_task
@@ -122,12 +151,12 @@ else:
                         else:
                             st.info("No free slot is left today after that time. Try an earlier time or a shorter task.")
                 except ValueError as err:  # Task rejects a bad time, duration, priority or frequency
-                    st.error(str(err))
+                    st.error(escape_markdown(str(err)))
 
     all_tasks = scheduler.sort_by_time()  # reads every pet's tasks through Owner.get_all_tasks()
     if all_tasks:
         if "flash" in st.session_state:
-            st.success(st.session_state.pop("flash"))
+            st.success(escape_markdown(st.session_state.pop("flash")))
 
         # Conflicts come first and cover every pending task, whatever the filters below hide, so a clash is never out of sight.
         conflicts = scheduler.detect_conflicts()
@@ -137,38 +166,35 @@ else:
                 "You can't be in two places at once. Change the time of one task listed below, or make it shorter."
             )
             for conflict in conflicts:
-                st.warning(conflict, icon="⚠️")
+                st.warning(escape_markdown(conflict), icon="⚠️")
         else:
             st.success("No scheduling conflicts.")
 
-        filter_pet, filter_status = st.columns(2)
+        filter_pet, filter_status, order_by = st.columns(3)
         with filter_pet:
             pet_filter = st.selectbox("Show pet", ["All pets"] + [p.name for p in owner.pets])
         with filter_status:
             status_filter = st.radio("Show tasks", ["All", "Pending", "Completed"], horizontal=True)
+        with order_by:
+            order_choice = st.radio("Order by", ["Time", "Priority first"], horizontal=True)
+        ordered = scheduler.sort_by_priority() if order_choice == "Priority first" else all_tasks
         matches = scheduler.filter_tasks(
             pet_name=None if pet_filter == "All pets" else pet_filter,
             status={"All": None, "Pending": False, "Completed": True}[status_filter],
         )
         match_ids = {id(t) for t in matches}
-        shown = [t for t in all_tasks if id(t) in match_ids]  # filter, then keep the chronological order
+        shown = [t for t in ordered if id(t) in match_ids]  # filter, then keep the chosen order
+
+        counts = summary_counts(all_tasks)  # tallies cover every task, whatever the filters hide
+        tally = st.columns(4)
+        tally[0].metric("📋 Tasks", counts["total"])
+        tally[1].metric("⏳ Pending", counts["pending"])
+        tally[2].metric("🚨 Overdue", counts["overdue"])
+        tally[3].metric("✅ Done", counts["done"])
 
         if shown:
-            st.table(
-                [
-                    {
-                        "Date": f"{t.due_date:%b %d}",
-                        "Time": t.time,
-                        "Task": t.description,
-                        "Pet": t.pet_name,
-                        "Min": t.duration,
-                        "Priority": t.priority,
-                        "Repeats": t.frequency,
-                        "Done": "yes" if t.completed else "no",
-                    }
-                    for t in shown
-                ]
-            )
+            st.dataframe(task_rows(shown), hide_index=True)  # a dataframe shows text literally; st.table would render Markdown
+            st.caption(LEGEND)
         else:
             st.info("No tasks match these filters.")
 
@@ -177,7 +203,7 @@ else:
             choice = st.selectbox(
                 "Mark a task done",
                 range(len(pending)),
-                format_func=lambda i: f"{pending[i].due_date:%b %d} {pending[i].time}  {pending[i].description} ({pending[i].pet_name})",
+                format_func=lambda i: f"{task_icon(pending[i].description)} {pending[i].due_date:%b %d} {pending[i].time}  {pending[i].description} ({pending[i].pet_name})",
             )
             if st.button("Mark complete"):
                 done = pending[choice]
@@ -191,7 +217,9 @@ else:
 
 with pets_table:
     if owner.pets:
-        st.table([{"Name": p.name, "Species": p.species, "Age": p.age, "Tasks": len(p.tasks)} for p in owner.pets])
+        st.dataframe(
+            [{"Name": p.name, "Species": p.species, "Age": p.age, "Tasks": len(p.tasks)} for p in owner.pets], hide_index=True
+        )
     else:
         st.info("No pets yet. Add one above.")
 
@@ -218,21 +246,19 @@ if st.button("Generate schedule"):
         else:
             st.info("Nothing to schedule today. Add some tasks first.")
     else:
-        st.success(
-            f"{len(plan)} task(s), {sum(t.duration for t in plan)} of {owner.available_minutes} minutes used."
-        )
-        st.table(
+        used = sum(t.duration for t in plan)
+        st.success(f"{len(plan)} task(s), {used} of {owner.available_minutes} minutes used.")
+        if owner.available_minutes > 0:
+            st.progress(min(used / owner.available_minutes, 1.0), text=f"Time budget: {used} of {owner.available_minutes} minutes")
+        st.dataframe(
             [
                 {
-                    "Time": t.time,
-                    "Task": t.description,
-                    "Pet": t.pet_name,
-                    "Min": t.duration,
-                    "Priority": t.priority,
+                    **{key: row[key] for key in ("Time", "Type", "Task", "Pet", "Min", "Priority")},
                     **({"Score": scheduler.task_score(t)} if weighted else {}),
                 }
-                for t in plan
-            ]
+                for t, row in zip(plan, task_rows(plan))
+            ],
+            hide_index=True,
         )
         with st.expander("Why this plan?", expanded=True):
             st.text(scheduler.explain_plan(weighted=weighted))
@@ -243,17 +269,37 @@ with st.expander("Saved data"):
     st.caption(f"Pets, tasks and your time budget are saved automatically to {DATA_FILE.name} and reloaded next time.")
     confirm = st.checkbox("I want to delete all pets and tasks")
     if st.button("Delete all saved data", disabled=not confirm):
-        DATA_FILE.unlink(missing_ok=True)
-        for key in ("owner", "owner_name", "available_minutes", "saved", "load_notice"):
-            st.session_state.pop(key, None)
-        st.rerun()  # the next run finds no file and starts with an empty owner
+        try:
+            DATA_FILE.unlink(missing_ok=True)
+        except OSError as err:
+            st.error(f"Could not delete {DATA_FILE.name}: {err}")
+        else:
+            for key in SESSION_KEYS:
+                st.session_state.pop(key, None)
+            st.rerun()  # the next run finds no file and starts with an empty owner
 
 # Autosave: write the file whenever anything changed since the last save. The rerun after "Mark complete"
-# ends its pass early, so that change is written by the pass that follows it.
+# ends its pass early, so that change is written by the pass that follows it. If another window or program
+# changed the file since this page loaded or saved it, writing would silently erase that work, so ask first.
 snapshot = json.dumps(owner.to_dict(), sort_keys=True)
-if snapshot != st.session_state.saved:
-    try:
-        owner.save(DATA_FILE)
-        st.session_state.saved = snapshot
-    except OSError as err:
-        st.warning(f"Could not save to {DATA_FILE.name}: {err}")
+if snapshot != st.session_state.saved and st.session_state.get("autosave", True):
+    if disk_signature() != st.session_state.disk_sig:
+        st.warning(
+            f"**{DATA_FILE.name} was changed by another window or program after this page loaded**, so your latest "
+            "changes were not saved. Choose which version to keep."
+        )
+        keep_this, keep_saved = st.columns(2)
+        if keep_this.button("Overwrite the file with this window"):
+            st.session_state.disk_sig = disk_signature()  # accept the other change as replaced; the next run saves
+            st.rerun()
+        if keep_saved.button("Reload the saved file (discard this window's changes)"):
+            for key in SESSION_KEYS:
+                st.session_state.pop(key, None)
+            st.rerun()
+    else:
+        try:
+            owner.save_to_json(DATA_FILE)
+            st.session_state.saved = snapshot
+            st.session_state.disk_sig = disk_signature()
+        except OSError as err:
+            st.warning(f"Could not save to {DATA_FILE.name}: {err}")

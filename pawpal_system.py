@@ -169,7 +169,7 @@ class Owner:
         except (KeyError, TypeError, AttributeError) as err:
             raise ValueError(f"invalid owner data: {err!r}") from err
 
-    def save(self, path: str | Path) -> None:
+    def save_to_json(self, path: str | Path) -> None:
         """Write the owner, pets and tasks to a JSON file. The file is replaced in one step, so a crash mid-save
         cannot leave a half-written data file."""
         path = Path(path)
@@ -182,15 +182,19 @@ class Owner:
             temp.unlink(missing_ok=True)  # no-op after a successful replace
 
     @classmethod
-    def load(cls, path: str | Path) -> "Owner | None":
-        """Read an owner saved by save(). Return None if the file does not exist; raise ValueError if it is unreadable,
+    def load_from_json(cls, path: str | Path) -> "Owner | None":
+        """Read an owner saved by save_to_json(). Return None if the file does not exist; raise ValueError if it is unreadable,
         from another version, or holds invalid data (the file itself is never modified)."""
         path = Path(path)
-        if not path.exists():
-            return None
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except ValueError as err:  # bad JSON or bad UTF-8 (both are ValueErrors)
+            text = path.read_text(encoding="utf-8-sig")  # utf-8-sig also accepts a file saved with a BOM (e.g. by Notepad)
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as err:  # unreadable file or folder, or bad UTF-8 (a ValueError)
+            raise ValueError(f"{path.name} could not be read: {err}") from err
+        try:
+            payload = json.loads(text)
+        except (ValueError, RecursionError) as err:  # bad JSON, or JSON nested too deeply to parse
             raise ValueError(f"{path.name} could not be read as JSON: {err}") from err
         if not isinstance(payload, dict) or payload.get("version") != DATA_VERSION:
             raise ValueError(f"{path.name} is not a PawPal+ data file (expected version {DATA_VERSION})")
@@ -223,6 +227,16 @@ class Scheduler:
         return sorted(
             self.owner.get_all_tasks(),
             key=lambda t: (t.due_date, t.time, PRIORITY_RANK.get(t.priority, 99)),
+        )
+
+    def sort_by_priority(self) -> list[Task]:
+        """Return all tasks most important first: priority (high, medium, low), then due date, then time of day.
+
+        Tasks that tie on all three keep the order they were added.
+        """
+        return sorted(
+            self.owner.get_all_tasks(),
+            key=lambda t: (PRIORITY_RANK[t.priority], t.due_date, t.time),
         )
 
     def filter_tasks(self, pet_name: str | None = None, status: bool | None = None) -> list[Task]:

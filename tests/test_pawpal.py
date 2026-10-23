@@ -1113,3 +1113,91 @@ def test_weighted_explanation_states_the_scoring_rule_with_its_numbers(household
     scheduler = _tight_budget_household(household)
     text = scheduler.explain_plan(TODAY, weighted=True)
     assert "priority points: high 10, medium 5, low 2; plus 1 per day overdue" in text
+
+
+# --- Priority-first sorting -------------------------------------------------------------------
+
+
+def test_sort_by_priority_lists_high_then_medium_then_low(household):
+    _, buddy, mia, scheduler = household
+    buddy.add_task(make_task("Low", "08:00", priority="low"))
+    mia.add_task(make_task("High", "20:00", priority="high"))
+    buddy.add_task(make_task("Medium", "12:00", priority="medium"))
+    assert _names(scheduler.sort_by_priority()) == ["High", "Medium", "Low"]
+
+
+@pytest.mark.parametrize("order", [("high", "medium", "low"), ("high", "low", "medium"), ("medium", "high", "low"),
+                                   ("medium", "low", "high"), ("low", "high", "medium"), ("low", "medium", "high")])
+def test_sort_by_priority_gives_the_same_ranking_whatever_order_tasks_were_added(household, order):
+    _, buddy, _, scheduler = household
+    for priority in order:
+        buddy.add_task(make_task(priority.title(), "09:00", priority=priority))
+    assert _names(scheduler.sort_by_priority()) == ["High", "Medium", "Low"]
+
+
+def test_within_one_priority_tasks_are_ordered_by_time(household):
+    _, buddy, mia, scheduler = household
+    buddy.add_task(make_task("Evening", "18:00", priority="high"))
+    mia.add_task(make_task("Morning", "07:30", priority="high"))
+    buddy.add_task(make_task("Noon", "12:00", priority="high"))
+    assert _names(scheduler.sort_by_priority()) == ["Morning", "Noon", "Evening"]
+
+
+def test_priority_outranks_time_unlike_sort_by_time(household):
+    _, buddy, _, scheduler = household
+    buddy.add_task(make_task("Early but low", "07:00", priority="low"))
+    buddy.add_task(make_task("Late but high", "21:00", priority="high"))
+    assert _names(scheduler.sort_by_priority()) == ["Late but high", "Early but low"]
+    assert _names(scheduler.sort_by_time()) == ["Early but low", "Late but high"]
+
+
+def test_at_the_same_priority_an_older_due_date_comes_before_an_earlier_time(household):
+    _, buddy, _, scheduler = household
+    buddy.add_task(make_task("Today early", "06:00", priority="medium"))
+    buddy.add_task(make_task("Overdue late", "22:00", priority="medium", due_date=TODAY - timedelta(days=2)))
+    assert _names(scheduler.sort_by_priority()) == ["Overdue late", "Today early"]
+
+
+def test_priority_still_outranks_an_older_due_date(household):
+    _, buddy, _, scheduler = household
+    buddy.add_task(make_task("Old low", "08:00", priority="low", due_date=TODAY - timedelta(days=9)))
+    buddy.add_task(make_task("New high", "08:00", priority="high"))
+    assert _names(scheduler.sort_by_priority()) == ["New high", "Old low"]
+
+
+def test_full_ties_in_priority_sort_keep_the_order_get_all_tasks_lists_them(household):
+    _, buddy, mia, scheduler = household
+    buddy.add_task(make_task("First", "09:00", duration=45, priority="high"))
+    mia.add_task(make_task("Second", "09:00", duration=5, priority="high"))
+    buddy.add_task(make_task("Third", "09:00", duration=20, priority="high"))
+    # pet by pet, each pet's tasks in the order they were added; duration never reorders a tie
+    assert _names(scheduler.sort_by_priority()) == ["First", "Third", "Second"]
+
+
+def test_sort_by_priority_is_empty_with_no_pets_or_no_tasks(household):
+    _, _, _, scheduler = household
+    assert scheduler.sort_by_priority() == []
+    assert Scheduler(Owner("Sam")).sort_by_priority() == []
+
+
+def test_sort_by_priority_returns_the_same_tasks_as_sort_by_time_and_leaves_pets_untouched(household):
+    _, buddy, mia, scheduler = household
+    done = make_task("Done", "08:00", priority="low")
+    done.mark_complete()
+    buddy.add_task(done)
+    mia.add_task(make_task("Open", "07:00", priority="high"))
+    buddy.add_task(make_task("Other", "09:00", priority="medium"))
+    before = [list(buddy.tasks), list(mia.tasks)]
+    assert sorted(_names(scheduler.sort_by_priority())) == sorted(_names(scheduler.sort_by_time()))
+    assert "Done" in _names(scheduler.sort_by_priority())  # completed tasks are listed, like sort_by_time
+    assert [buddy.tasks, mia.tasks] == before
+
+
+def test_the_daily_plan_is_chosen_in_the_same_priority_order(household):
+    owner, buddy, _, scheduler = household
+    owner.available_minutes = 60
+    buddy.add_task(make_task("Low early", "07:00", duration=30, priority="low"))
+    buddy.add_task(make_task("High late", "20:00", duration=30, priority="high"))
+    buddy.add_task(make_task("Medium", "12:00", duration=30, priority="medium"))
+    assert _names(scheduler.sort_by_priority()) == ["High late", "Medium", "Low early"]
+    assert _names(scheduler.generate_plan(TODAY)) == ["Medium", "High late"]  # the top two by priority, shown by time

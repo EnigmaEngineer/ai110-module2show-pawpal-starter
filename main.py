@@ -1,33 +1,25 @@
-"""Temporary terminal testing ground for the PawPal+ logic layer."""
+"""Terminal demo of the PawPal+ logic layer, with icons, colour-coded labels and boxed tables."""
 
+import sys
 import tempfile
 from datetime import date, timedelta
 from pathlib import Path
 
+from formatting import LEGEND, budget_bar, summary_line, tasks_table
 from pawpal_system import Owner, Pet, Scheduler, Task
 
 
-HEADERS = ("Date", "Time", "Task", "Pet", "Min", "Priority", "Done")
-
-
 def print_tasks(title: str, tasks: list[Task]) -> None:
-    """Print tasks as an aligned table under a title."""
+    """Print tasks as a boxed table with icons and colour-coded priority and status, under a title."""
     if title:
         print(f"\n{title}")
-    if not tasks:
-        print("  (none)")
-        return
-    rows = [
-        (f"{t.due_date:%b %d}", t.time, t.description, t.pet_name, str(t.duration), t.priority, "yes" if t.completed else "no")
-        for t in tasks
-    ]
-    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(HEADERS)]
-    # Right-align the numeric Min column; left-align the rest.
-    line = "  " + "  ".join(f"{{:{'>' if h == 'Min' else '<'}{w}}}" for h, w in zip(HEADERS, widths))
-    print(line.format(*HEADERS).rstrip())
-    print("  " + "  ".join("-" * w for w in widths))
-    for row in rows:
-        print(line.format(*row).rstrip())
+    print(indent(tasks_table(tasks)))
+
+
+def indent(text: str, spaces: int = 2) -> str:
+    """Indent every line of a block of text."""
+    pad = " " * spaces
+    return "\n".join(pad + line for line in text.splitlines())
 
 
 def print_todays_schedule(scheduler: Scheduler) -> None:
@@ -36,7 +28,8 @@ def print_todays_schedule(scheduler: Scheduler) -> None:
     used = sum(t.duration for t in plan)
     print(f"\n=== Today's Schedule: {today:%A, %B %d, %Y} ===")
     print_tasks("", plan)
-    print(f"\n  {len(plan)} tasks, {used} of {scheduler.owner.available_minutes} minutes used")
+    print(f"\n  {summary_line(plan)}")
+    print(f"  Time budget  {budget_bar(used, scheduler.owner.available_minutes)}")
 
 
 def sorting_check() -> None:
@@ -55,6 +48,21 @@ def sorting_check() -> None:
     print_tasks("Via scheduler.sort_by_time():", ordered)
     times = [t.time for t in ordered]
     print(f"\n  Times ascend: {times == sorted(times)} {times}")
+
+
+def priority_sorting_check() -> None:
+    """Show sort_by_time and sort_by_priority ordering the same tasks differently."""
+    print("\n=== Priority-first sorting ===")
+    owner = Owner("Sam")
+    buddy = Pet("Buddy", "dog", 3)
+    owner.add_pet(buddy)
+    buddy.add_task(Task("Evening meds", "20:00", 5, "high", "daily"))
+    buddy.add_task(Task("Play fetch", "07:00", 20, "low", "once"))
+    buddy.add_task(Task("Lunch walk", "12:00", 30, "medium", "once"))
+    buddy.add_task(Task("Breakfast", "06:30", 10, "high", "daily"))
+    scheduler = Scheduler(owner)
+    print_tasks("By time:", scheduler.sort_by_time())
+    print_tasks("By priority (high first, then time):", scheduler.sort_by_priority())
 
 
 def completion_check(title: str, days_late: int) -> None:
@@ -109,6 +117,29 @@ def conflict_check() -> None:
     print_conflicts(scheduler)
 
 
+def overlap_and_free_slot_check() -> None:
+    """Show same-start and overlapping tasks being flagged, back-to-back tasks being left alone, and free-slot search."""
+    print("\n=== Overlap detection and next free slot ===")
+    owner = Owner("Sam")
+    buddy, mia = Pet("Buddy", "dog", 3), Pet("Mia", "cat", 2)
+    owner.add_pet(buddy)
+    owner.add_pet(mia)
+    buddy.add_task(Task("Long walk", "09:00", 60, "medium", "once"))  # busy 09:00-10:00
+    buddy.add_task(Task("Brush", "09:00", 15, "low", "once"))  # same start as the walk
+    mia.add_task(Task("Feed", "09:30", 10, "high", "once"))  # starts while the walk is still going
+    mia.add_task(Task("Meds", "10:00", 5, "high", "once"))  # starts the minute the walk ends: no clash
+    scheduler = Scheduler(owner)
+
+    print_tasks("Tasks:", scheduler.sort_by_time())
+    print("\nWarnings:")
+    for warning in scheduler.detect_conflicts():
+        print(f"  {warning}")
+    print("\nNext free slot (first time the whole task fits between the others):")
+    for minutes, earliest in ((30, "08:00"), (15, "09:00"), (60, "09:00")):
+        slot = scheduler.suggest_free_time(minutes, earliest=earliest)
+        print(f"  {minutes} min, not before {earliest}: {slot or 'nothing fits today'}")
+
+
 def weighted_planning_check() -> None:
     """Show strict priority and priority-with-aging choosing differently when the budget allows only one task."""
     print("\n=== Weighted prioritization (aging) ===")
@@ -142,9 +173,9 @@ def persistence_check() -> None:
 
     with tempfile.TemporaryDirectory() as folder:
         path = Path(folder) / "data.json"
-        owner.save(path)
+        owner.save_to_json(path)
         print(f"  Saved {len(owner.pets)} pets and {len(owner.get_all_tasks())} tasks to {path.name} ({path.stat().st_size} bytes)")
-        loaded = Owner.load(path)
+        loaded = Owner.load_from_json(path)
 
     pets = ", ".join(f"{p.name} ({len(p.tasks)} task{'s' if len(p.tasks) != 1 else ''})" for p in loaded.pets)
     print(f"  Reloaded: {loaded.name}, {loaded.available_minutes} minutes, pets {pets}")
@@ -160,7 +191,20 @@ def persistence_check() -> None:
         print(f"\n  A task with a bad time in the file is rejected: {err}")
 
 
+def use_utf8_output() -> None:
+    """Make stdout able to print emoji and box lines.
+
+    A Windows console on a legacy code page cannot encode them and would stop the demo with a UnicodeEncodeError.
+    Does nothing if the stream cannot be reconfigured (for example an in-memory capture).
+    """
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError, OSError):
+        pass
+
+
 def main() -> None:
+    use_utf8_output()
     owner = Owner("Sam", available_minutes=90)
     buddy = Pet("Buddy", "dog", 3)
     mia = Pet("Mia", "cat", 2)
@@ -177,6 +221,7 @@ def main() -> None:
     scheduler = Scheduler(owner)
 
     print(f"Owner: {owner.name}, {owner.available_minutes} minutes available")
+    print(f"{LEGEND}\n")
     print_todays_schedule(scheduler)
     print_tasks("All tasks, sorted by time:", scheduler.sort_by_time())
 
@@ -194,9 +239,11 @@ def main() -> None:
     print_tasks("Completed tasks:", scheduler.filter_tasks(status=True))
 
     sorting_check()
+    priority_sorting_check()
     completion_check("Daily recurrence (happy path)", days_late=0)
     completion_check("Late completion", days_late=3)
     conflict_check()
+    overlap_and_free_slot_check()
     weighted_planning_check()
     persistence_check()
 
