@@ -1,16 +1,22 @@
 """PawPal+ logic layer: Owner, Pet, Task, and Scheduler.
 
-Attributes and method signatures mirror diagrams/uml.mmd. The Scheduler
+Attributes and method signatures mirror diagrams/uml_final.mmd. The Scheduler
 reads every task through Owner.get_all_tasks(), never from a single Pet.
 """
 
+import json
+import os
 import re
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
+from pathlib import Path
 
 PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}  # lower rank = more important
+PRIORITY_POINTS = {"high": 10, "medium": 5, "low": 2}  # base score for weighted planning
+OVERDUE_POINTS_PER_DAY = 1  # aging: each day overdue adds this many points
 FREQUENCY_DAYS = {"daily": 1, "weekly": 7}  # "once" never recurs
 MINUTES_PER_DAY = 24 * 60
+DATA_VERSION = 1  # bump if the saved JSON layout changes
 TIME_PATTERN = re.compile(r"([01]\d|2[0-3]):[0-5]\d", re.ASCII)  # ASCII: \d must not match other scripts' digits
 
 
@@ -48,6 +54,36 @@ class Task:
         anchor = max(self.due_date, from_date or date.today())
         return anchor + timedelta(days=days)
 
+    def to_dict(self) -> dict:
+        """Return this task as JSON-ready data. The pet name is left out: the owning Pet restores it on load."""
+        return {
+            "description": self.description,
+            "time": self.time,
+            "duration": self.duration,
+            "priority": self.priority,
+            "frequency": self.frequency,
+            "completed": self.completed,
+            "due_date": self.due_date.isoformat(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Task":
+        """Rebuild a task from to_dict output; raise ValueError if the data is missing, mistyped or invalid."""
+        try:
+            description, duration, completed = data["description"], data["duration"], data["completed"]
+            if not isinstance(description, str) or not description.strip():
+                raise ValueError("description must be non-empty text")
+            if isinstance(duration, bool) or not isinstance(duration, int):
+                raise ValueError("duration must be a whole number of minutes")
+            if not isinstance(completed, bool):
+                raise ValueError("completed must be true or false")
+            return cls(
+                description, data["time"], duration, data["priority"], data["frequency"],
+                completed=completed, due_date=date.fromisoformat(data["due_date"]),
+            )
+        except (KeyError, TypeError, AttributeError) as err:  # missing key, wrong type, or data that is not a dict
+            raise ValueError(f"invalid task data: {err!r}") from err
+
     def __str__(self) -> str:
         """Return a one-line summary: completion mark, time, description, pet, duration and priority."""
         mark = "x" if self.completed else " "
@@ -73,6 +109,27 @@ class Pet:
         task.pet_name = self.name
         self.tasks.append(task)
 
+    def to_dict(self) -> dict:
+        """Return this pet and all its tasks as JSON-ready data."""
+        return {"name": self.name, "species": self.species, "age": self.age, "tasks": [t.to_dict() for t in self.tasks]}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Pet":
+        """Rebuild a pet and its tasks from to_dict output; raise ValueError if the data is invalid."""
+        try:
+            name, species, age, tasks = data["name"], data["species"], data["age"], data["tasks"]
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("pet name must be non-empty text")
+            if not isinstance(species, str):
+                raise ValueError("species must be text")
+            if isinstance(age, bool) or not isinstance(age, int) or age < 0:
+                raise ValueError("age must be a whole number, zero or more")
+            if not isinstance(tasks, list):
+                raise ValueError("tasks must be a list")
+            return cls(name, species, age, [Task.from_dict(t) for t in tasks])
+        except (KeyError, TypeError, AttributeError) as err:
+            raise ValueError(f"invalid pet data: {err!r}") from err
+
 
 @dataclass
 class Owner:
@@ -89,6 +146,55 @@ class Owner:
     def get_all_tasks(self) -> list[Task]:
         """Return every task across all pets as one flat list."""
         return [task for pet in self.pets for task in pet.tasks]
+
+    def to_dict(self) -> dict:
+        """Return the owner, pets and tasks as JSON-ready data."""
+        return {"name": self.name, "available_minutes": self.available_minutes, "pets": [p.to_dict() for p in self.pets]}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Owner":
+        """Rebuild an owner from to_dict output; raise ValueError if the data is invalid or repeats a pet name."""
+        try:
+            name, minutes, pets = data["name"], data["available_minutes"], data["pets"]
+            if not isinstance(name, str):
+                raise ValueError("owner name must be text")
+            if isinstance(minutes, bool) or not isinstance(minutes, int) or not 0 <= minutes <= MINUTES_PER_DAY:
+                raise ValueError(f"available_minutes must be a whole number from 0 to {MINUTES_PER_DAY}")
+            if not isinstance(pets, list):
+                raise ValueError("pets must be a list")
+            owner = cls(name, available_minutes=minutes)
+            for pet_data in pets:
+                owner.add_pet(Pet.from_dict(pet_data))  # add_pet rejects a repeated name
+            return owner
+        except (KeyError, TypeError, AttributeError) as err:
+            raise ValueError(f"invalid owner data: {err!r}") from err
+
+    def save(self, path: str | Path) -> None:
+        """Write the owner, pets and tasks to a JSON file. The file is replaced in one step, so a crash mid-save
+        cannot leave a half-written data file."""
+        path = Path(path)
+        temp = path.with_name(path.name + ".tmp")
+        payload = {"version": DATA_VERSION, "owner": self.to_dict()}
+        try:
+            temp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            os.replace(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)  # no-op after a successful replace
+
+    @classmethod
+    def load(cls, path: str | Path) -> "Owner | None":
+        """Read an owner saved by save(). Return None if the file does not exist; raise ValueError if it is unreadable,
+        from another version, or holds invalid data (the file itself is never modified)."""
+        path = Path(path)
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError as err:  # bad JSON or bad UTF-8 (both are ValueErrors)
+            raise ValueError(f"{path.name} could not be read as JSON: {err}") from err
+        if not isinstance(payload, dict) or payload.get("version") != DATA_VERSION:
+            raise ValueError(f"{path.name} is not a PawPal+ data file (expected version {DATA_VERSION})")
+        return cls.from_dict(payload.get("owner"))
 
 
 def _to_minutes(time: str) -> int:
@@ -169,6 +275,30 @@ class Scheduler:
                 pairs.append((first, second))
         return pairs
 
+    def suggest_free_time(
+        self, duration: int, day: date | None = None, earliest: str = "00:00", ignore: Task | None = None
+    ) -> str | None:
+        """Return the first "HH:MM" at or after `earliest` where `duration` minutes fit between pending tasks on `day`.
+
+        `ignore` leaves one task out of the check, e.g. the task being moved. Returns None if nothing fits before midnight.
+        """
+        if duration <= 0:
+            raise ValueError(f"duration must be positive, got {duration}")
+        if not TIME_PATTERN.fullmatch(earliest):
+            raise ValueError(f"earliest must be zero-padded HH:MM, got {earliest!r}")
+        day = day or date.today()
+        busy = sorted(
+            (_to_minutes(t.time), _to_minutes(t.time) + t.duration)
+            for t in self.owner.get_all_tasks()
+            if not t.completed and t.due_date == day and t is not ignore
+        )
+        start = _to_minutes(earliest)
+        for busy_start, busy_end in busy:
+            if start + duration <= busy_start:
+                break  # fits in the gap before this task
+            start = max(start, busy_end)
+        return _format_minutes(start) if start + duration <= MINUTES_PER_DAY else None
+
     def complete_task(self, task: Task) -> Task | None:
         """Mark a task complete; if it recurs, make sure its pet has the next occurrence and return it.
 
@@ -190,26 +320,43 @@ class Scheduler:
         pet.add_task(follow_up)
         return follow_up
 
-    def generate_plan(self, day: date | None = None) -> list[Task]:
-        """Build the ordered daily plan, fitting tasks into owner.available_minutes."""
-        return self._build_plan(day or date.today())[0]
+    def task_score(self, task: Task, day: date | None = None) -> int:
+        """Return the task's weighted-planning score: priority points plus a bonus for each day overdue on `day`."""
+        days_overdue = max(0, ((day or date.today()) - task.due_date).days)
+        return PRIORITY_POINTS[task.priority] + OVERDUE_POINTS_PER_DAY * days_overdue
 
-    def explain_plan(self, day: date | None = None) -> str:
+    def generate_plan(self, day: date | None = None, weighted: bool = False) -> list[Task]:
+        """Build the ordered daily plan, fitting tasks into owner.available_minutes.
+
+        By default tasks are chosen strictly by priority. With `weighted=True` they are chosen by task_score, so a
+        task that has been overdue long enough can outrank a higher-priority task due today.
+        """
+        return self._build_plan(day or date.today(), weighted)[0]
+
+    def explain_plan(self, day: date | None = None, weighted: bool = False) -> str:
         """Return a human-readable explanation of the plan's ordering and what was left out."""
         day = day or date.today()
-        plan, skipped = self._build_plan(day)
+        plan, skipped = self._build_plan(day, weighted)
         budget = self.owner.available_minutes
         used = sum(t.duration for t in plan)
-        lines = [
-            f"Plan for {day}: {len(plan)} task(s), {used} of {budget} available minutes used.",
-            "Tasks were chosen by priority (high first), then oldest due date (overdue first), "
-            "then earliest time, until time ran out; they are listed in the order they happen.",
-        ]
+        if weighted:
+            how = (
+                f"Tasks were chosen by score (priority points: high {PRIORITY_POINTS['high']}, medium "
+                f"{PRIORITY_POINTS['medium']}, low {PRIORITY_POINTS['low']}; plus {OVERDUE_POINTS_PER_DAY} per day overdue), "
+                "highest first, until time ran out; they are listed in the order they happen."
+            )
+        else:
+            how = (
+                "Tasks were chosen by priority (high first), then oldest due date (overdue first), "
+                "then earliest time, until time ran out; they are listed in the order they happen."
+            )
+        lines = [f"Plan for {day}: {len(plan)} task(s), {used} of {budget} available minutes used.", how]
 
         def describe(task: Task) -> str:
-            """Return the task's summary line, flagged if it was due before `day`."""
+            """Return the task's summary line, flagged if it was due before `day` and scored if weighted."""
             overdue = f" (overdue since {task.due_date})" if task.due_date < day else ""
-            return f"  {task}{overdue}"
+            score = f" [score {self.task_score(task, day)}]" if weighted else ""
+            return f"  {task}{overdue}{score}"
 
         lines += [describe(t) for t in plan]
         if skipped:
@@ -217,10 +364,13 @@ class Scheduler:
             lines += [describe(t) for t in skipped]
         return "\n".join(lines)
 
-    def _build_plan(self, day: date) -> tuple[list[Task], list[Task]]:
+    def _build_plan(self, day: date, weighted: bool = False) -> tuple[list[Task], list[Task]]:
         """Return (plan, skipped): pending tasks due by `day`, split by what fits in the time budget."""
         pending = [t for t in self.owner.get_all_tasks() if not t.completed and t.due_date <= day]
-        by_importance = sorted(pending, key=lambda t: (PRIORITY_RANK[t.priority], t.due_date, t.time))
+        if weighted:
+            by_importance = sorted(pending, key=lambda t: (-self.task_score(t, day), t.due_date, t.time))
+        else:
+            by_importance = sorted(pending, key=lambda t: (PRIORITY_RANK[t.priority], t.due_date, t.time))
         remaining = self.owner.available_minutes
         chosen: list[Task] = []
         skipped: list[Task] = []

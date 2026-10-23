@@ -1,6 +1,8 @@
 """Temporary terminal testing ground for the PawPal+ logic layer."""
 
+import tempfile
 from datetime import date, timedelta
+from pathlib import Path
 
 from pawpal_system import Owner, Pet, Scheduler, Task
 
@@ -107,6 +109,57 @@ def conflict_check() -> None:
     print_conflicts(scheduler)
 
 
+def weighted_planning_check() -> None:
+    """Show strict priority and priority-with-aging choosing differently when the budget allows only one task."""
+    print("\n=== Weighted prioritization (aging) ===")
+    owner = Owner("Sam", available_minutes=30)  # room for exactly one 30-minute task
+    buddy = Pet("Buddy", "dog", 3)
+    owner.add_pet(buddy)
+    buddy.add_task(Task("Evening walk", "18:00", 30, "medium", "once"))
+    buddy.add_task(Task("Brush teeth", "09:00", 30, "low", "once", due_date=date.today() - timedelta(days=5)))
+    scheduler = Scheduler(owner)
+
+    for task in scheduler.sort_by_time():
+        print(f"  score {scheduler.task_score(task):>2}  {task}")
+    print("\nStrict priority:")
+    print(scheduler.explain_plan())
+    print("\nPriority with aging:")
+    print(scheduler.explain_plan(weighted=True))
+
+
+def persistence_check() -> None:
+    """Save an owner to a JSON file, load it back, and show that nothing was lost (uses a temporary folder)."""
+    print("\n=== Data persistence ===")
+    owner = Owner("Sam", available_minutes=90)
+    buddy, mia = Pet("Buddy", "dog", 3), Pet("Mia", "cat", 2)
+    owner.add_pet(buddy)
+    owner.add_pet(mia)
+    buddy.add_task(Task("Morning walk", "08:00", 30, "high", "daily"))
+    buddy.add_task(Task("Grooming", "16:00", 45, "low", "weekly", due_date=date.today() - timedelta(days=3)))
+    done = Task("Medication", "12:30", 5, "high", "once")
+    done.mark_complete()
+    mia.add_task(done)
+
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "data.json"
+        owner.save(path)
+        print(f"  Saved {len(owner.pets)} pets and {len(owner.get_all_tasks())} tasks to {path.name} ({path.stat().st_size} bytes)")
+        loaded = Owner.load(path)
+
+    pets = ", ".join(f"{p.name} ({len(p.tasks)} task{'s' if len(p.tasks) != 1 else ''})" for p in loaded.pets)
+    print(f"  Reloaded: {loaded.name}, {loaded.available_minutes} minutes, pets {pets}")
+    print(f"  Reloaded owner equals the original: {loaded == owner}")
+    print_tasks("Reloaded tasks, sorted by time:", Scheduler(loaded).sort_by_time())
+
+    try:
+        Owner.from_dict({"name": "Sam", "available_minutes": 90, "pets": [
+            {"name": "Rex", "species": "dog", "age": 2, "tasks": [
+                {"description": "Walk", "time": "8am", "duration": 30, "priority": "high",
+                 "frequency": "once", "completed": False, "due_date": "2026-03-02"}]}]})
+    except ValueError as err:
+        print(f"\n  A task with a bad time in the file is rejected: {err}")
+
+
 def main() -> None:
     owner = Owner("Sam", available_minutes=90)
     buddy = Pet("Buddy", "dog", 3)
@@ -144,6 +197,8 @@ def main() -> None:
     completion_check("Daily recurrence (happy path)", days_late=0)
     completion_check("Late completion", days_late=3)
     conflict_check()
+    weighted_planning_check()
+    persistence_check()
 
 
 if __name__ == "__main__":

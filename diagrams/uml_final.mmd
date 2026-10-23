@@ -1,0 +1,65 @@
+classDiagram
+    %% Mirrors pawpal_system.py. __post_init__ validates (Task) or copies and stamps (Pet) on construction.
+    %% Module-level helpers are not classes and are left out:
+    %% DATA_VERSION, PRIORITY_RANK, PRIORITY_POINTS, OVERDUE_POINTS_PER_DAY, FREQUENCY_DAYS, MINUTES_PER_DAY, TIME_PATTERN, _to_minutes, _format_minutes, _same_occurrence
+    class Owner {
+        +str name
+        +list~Pet~ pets
+        +int available_minutes
+        +add_pet(pet) void
+        +get_all_tasks() list~Task~
+        +to_dict() dict
+        +from_dict(data)$ Owner
+        +save(path) void
+        +load(path)$ Owner?
+    }
+
+    class Pet {
+        +str name
+        +str species
+        +int age
+        +list~Task~ tasks
+        +#95;#95;post_init#95;#95;() void
+        +add_task(task) void
+        +to_dict() dict
+        +from_dict(data)$ Pet
+    }
+
+    class Task {
+        +str description
+        +str time
+        +int duration
+        +str priority
+        +str frequency
+        +bool completed
+        +date due_date
+        +str pet_name
+        +#95;#95;post_init#95;#95;() void
+        +mark_complete() void
+        +next_occurrence(from_date) date?
+        +#95;#95;str#95;#95;() str
+        +to_dict() dict
+        +from_dict(data)$ Task
+    }
+
+    class Scheduler {
+        +Owner owner
+        +#95;#95;init#95;#95;(owner) void
+        +sort_by_time() list~Task~
+        +filter_tasks(pet_name, status) list~Task~
+        +detect_conflicts() list~str~
+        +suggest_free_time(duration, day, earliest, ignore) str?
+        +complete_task(task) Task?
+        +task_score(task, day) int
+        +generate_plan(day, weighted) list~Task~
+        +explain_plan(day, weighted) str
+        -_build_plan(day, weighted) tuple
+        -_overlapping_pairs(tasks)$ list~tuple~
+    }
+
+    %% A Task knows its Pet only by the pet_name string, which Pet.add_task sets. There is no object link back.
+    Owner "1" *-- "*" Pet : has
+    Pet "1" *-- "*" Task : has and stamps pet_name
+    Scheduler --> "1" Owner : holds, reads tasks via get_all_tasks
+    Scheduler ..> Pet : complete_task finds the pet by name and calls add_task
+    Scheduler ..> Task : sorts, filters, plans, completes and copies for the next occurrence

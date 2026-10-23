@@ -896,3 +896,220 @@ def test_a_completed_or_different_next_task_does_not_block_the_follow_up(househo
     assert follow_up not in (already_done, other_time)
     assert follow_up.due_date == tomorrow and follow_up.time == "08:00"
     assert len(buddy.tasks) == 4
+
+
+# --- suggest_free_time ---------------------------------------------------------
+
+
+def test_suggest_free_time_on_an_empty_day_is_the_earliest_time(household):
+    _, _, _, scheduler = household
+    assert scheduler.suggest_free_time(30, TODAY) == "00:00"
+    assert scheduler.suggest_free_time(30, TODAY, earliest="07:15") == "07:15"
+
+
+def test_suggest_free_time_skips_past_a_busy_task(household):
+    _, buddy, _, scheduler = household
+    buddy.add_task(make_task("Walk", "08:00", duration=30))
+    assert scheduler.suggest_free_time(20, TODAY, earliest="08:00") == "08:30"
+    assert scheduler.suggest_free_time(20, TODAY, earliest="08:10") == "08:30"  # starts inside the task
+
+
+def test_suggest_free_time_uses_a_gap_that_fits_exactly(household):
+    _, buddy, mia, scheduler = household
+    buddy.add_task(make_task("A", "08:00", duration=30))  # busy 08:00-08:30
+    mia.add_task(make_task("B", "09:00", duration=30))  # busy 09:00-09:30
+    assert scheduler.suggest_free_time(30, TODAY, earliest="08:00") == "08:30"  # the 30-minute gap fits exactly
+    assert scheduler.suggest_free_time(31, TODAY, earliest="08:00") == "09:30"  # one minute too long, so after B
+
+
+def test_suggest_free_time_chains_back_to_back_tasks(household):
+    _, buddy, mia, scheduler = household
+    buddy.add_task(make_task("A", "08:00", duration=30))
+    mia.add_task(make_task("B", "08:30", duration=30))
+    assert scheduler.suggest_free_time(15, TODAY, earliest="08:00") == "09:00"
+
+
+def test_suggest_free_time_ignores_completed_tasks_other_dates_and_the_ignored_task(household):
+    _, buddy, _, scheduler = household
+    done = make_task("Done", "08:00", duration=60)
+    done.mark_complete()
+    moving = make_task("Moving", "08:00", duration=60)
+    for t in (done, moving, make_task("Tomorrow", "08:00", duration=60, due_date=TODAY + timedelta(days=1))):
+        buddy.add_task(t)
+    assert scheduler.suggest_free_time(30, TODAY, earliest="08:00") == "09:00"  # only `moving` blocks
+    assert scheduler.suggest_free_time(30, TODAY, earliest="08:00", ignore=moving) == "08:00"
+
+
+def test_suggest_free_time_returns_none_when_nothing_fits_before_midnight(household):
+    _, buddy, _, scheduler = household
+    buddy.add_task(make_task("Late", "23:00", duration=45))  # busy 23:00-23:45
+    assert scheduler.suggest_free_time(30, TODAY, earliest="23:00") is None
+    assert scheduler.suggest_free_time(15, TODAY, earliest="23:00") == "23:45"
+    assert scheduler.suggest_free_time(15, TODAY, earliest="23:50") is None  # 23:50 + 15 runs past midnight
+
+
+@pytest.mark.parametrize("duration, earliest", [(0, "08:00"), (-5, "08:00"), (30, "8:00"), (30, "25:00")])
+def test_suggest_free_time_rejects_bad_input(household, duration, earliest):
+    _, _, _, scheduler = household
+    with pytest.raises(ValueError):
+        scheduler.suggest_free_time(duration, TODAY, earliest=earliest)
+
+
+def test_suggestion_resolves_the_conflict_it_was_made_for(household):
+    _, buddy, mia, scheduler = household
+    buddy.add_task(make_task("Walk", "08:00", duration=30))
+    clash = make_task("Feed", "08:00", duration=10)
+    mia.add_task(clash)
+    assert scheduler.detect_conflicts()
+    clash.time = scheduler.suggest_free_time(clash.duration, clash.due_date, earliest=clash.time, ignore=clash)
+    assert clash.time == "08:30" and scheduler.detect_conflicts() == []
+
+
+# --- sort_by_time: priority tiebreak and empty inputs ---------------------------
+
+
+def test_sort_by_time_breaks_same_time_ties_by_priority(household):
+    _, buddy, mia, scheduler = household
+    buddy.add_task(make_task("Low", "08:00", priority="low"))
+    mia.add_task(make_task("High", "08:00", priority="high"))
+    buddy.add_task(make_task("Medium", "08:00", priority="medium"))
+    assert [t.description for t in scheduler.sort_by_time()] == ["High", "Medium", "Low"]
+
+
+def test_sort_by_time_priority_never_outranks_an_earlier_time(household):
+    _, buddy, _, scheduler = household
+    buddy.add_task(make_task("Late but high", "18:00", priority="high"))
+    buddy.add_task(make_task("Early but low", "07:00", priority="low"))
+    assert [t.description for t in scheduler.sort_by_time()] == ["Early but low", "Late but high"]
+
+
+def test_sort_by_time_is_empty_with_no_pets_or_no_tasks(household):
+    _, _, _, scheduler = household  # two pets, neither has a task
+    assert scheduler.sort_by_time() == []
+    assert Scheduler(Owner("Sam")).sort_by_time() == []
+
+
+# --- Weighted prioritization with aging -----------------------------------------
+
+
+def _names(tasks):
+    return [t.description for t in tasks]
+
+
+@pytest.mark.parametrize(
+    "priority, days_overdue, expected",
+    [("high", 0, 10), ("medium", 0, 5), ("low", 0, 2), ("low", 3, 5), ("high", 4, 14)],
+)
+def test_task_score_is_priority_points_plus_one_per_day_overdue(household, priority, days_overdue, expected):
+    _, _, _, scheduler = household
+    task = make_task(priority=priority, due_date=TODAY - timedelta(days=days_overdue))
+    assert scheduler.task_score(task, TODAY) == expected
+
+
+def test_task_score_gives_no_bonus_or_penalty_for_a_future_task(household):
+    _, _, _, scheduler = household
+    task = make_task(priority="medium", due_date=TODAY + timedelta(days=5))
+    assert scheduler.task_score(task, TODAY) == 5
+
+
+def test_a_long_overdue_low_task_outranks_a_medium_task_due_today_when_weighted(household):
+    owner, buddy, _, scheduler = household
+    owner.available_minutes = 30  # room for exactly one of the two
+    buddy.add_task(make_task("Medium today", "08:00", priority="medium"))
+    buddy.add_task(make_task("Low, 5 days late", "09:00", priority="low", due_date=TODAY - timedelta(days=5)))
+    assert _names(scheduler.generate_plan(TODAY)) == ["Medium today"]  # strict priority: the default
+    assert _names(scheduler.generate_plan(TODAY, weighted=True)) == ["Low, 5 days late"]  # 2 + 5 beats 5
+
+
+def test_aging_has_to_catch_up_before_a_low_task_beats_a_high_one(household):
+    owner, buddy, _, scheduler = household
+    owner.available_minutes = 30
+    buddy.add_task(make_task("High today", "08:00", priority="high"))
+    buddy.add_task(make_task("Low, 7 days late", "09:00", priority="low", due_date=TODAY - timedelta(days=7)))
+    assert _names(scheduler.generate_plan(TODAY, weighted=True)) == ["High today"]  # 9 < 10
+
+
+def test_a_score_tie_goes_to_the_older_due_date(household):
+    owner, buddy, _, scheduler = household
+    owner.available_minutes = 30
+    buddy.add_task(make_task("High today", "08:00", priority="high"))
+    buddy.add_task(make_task("Low, 8 days late", "09:00", priority="low", due_date=TODAY - timedelta(days=8)))
+    assert _names(scheduler.generate_plan(TODAY, weighted=True)) == ["Low, 8 days late"]  # 10 ties 10; older wins
+
+
+def test_weighted_plan_matches_strict_plan_when_nothing_is_overdue(household):
+    owner, buddy, mia, scheduler = household
+    owner.available_minutes = 60
+    buddy.add_task(make_task("A", "10:00", priority="low"))
+    buddy.add_task(make_task("B", "09:00", priority="high"))
+    mia.add_task(make_task("C", "11:00", priority="medium"))
+    mia.add_task(make_task("D", "08:00", priority="medium"))
+    assert _names(scheduler.generate_plan(TODAY, weighted=True)) == _names(scheduler.generate_plan(TODAY))
+
+
+@pytest.mark.parametrize("budget", [0, 29, 30, 59, 60, 95, 300])
+def test_weighted_plan_never_exceeds_the_time_budget(household, budget):
+    owner, buddy, mia, scheduler = household
+    owner.available_minutes = budget
+    for i, (pet, prio, late) in enumerate([(buddy, "high", 0), (buddy, "low", 6), (mia, "medium", 2), (mia, "low", 0)]):
+        pet.add_task(make_task(f"T{i}", f"{8 + i}:00".zfill(5), duration=30, priority=prio, due_date=TODAY - timedelta(days=late)))
+    plan = scheduler.generate_plan(TODAY, weighted=True)
+    assert sum(t.duration for t in plan) <= budget
+
+
+def test_weighted_plan_still_skips_completed_and_future_tasks(household):
+    _, buddy, _, scheduler = household
+    done = make_task("Done", "08:00", priority="high", due_date=TODAY - timedelta(days=9))
+    done.mark_complete()
+    buddy.add_task(done)
+    buddy.add_task(make_task("Future", "09:00", priority="high", due_date=TODAY + timedelta(days=1)))
+    buddy.add_task(make_task("Today", "10:00"))
+    assert _names(scheduler.generate_plan(TODAY, weighted=True)) == ["Today"]
+
+
+def test_weighted_plan_is_listed_chronologically_not_by_score(household):
+    _, buddy, _, scheduler = household
+    buddy.add_task(make_task("Late high", "18:00", priority="high"))
+    buddy.add_task(make_task("Early low", "07:00", priority="low"))
+    assert _names(scheduler.generate_plan(TODAY, weighted=True)) == ["Early low", "Late high"]
+
+
+def test_explain_plan_shows_scores_only_when_weighted(household):
+    _, buddy, _, scheduler = household
+    buddy.add_task(make_task("Walk", priority="low", due_date=TODAY - timedelta(days=3)))
+    weighted = scheduler.explain_plan(TODAY, weighted=True)
+    assert "[score 5]" in weighted and "priority points" in weighted and "overdue since" in weighted
+    strict = scheduler.explain_plan(TODAY)
+    assert "[score" not in strict and "priority points" not in strict
+
+
+def _tight_budget_household(household):
+    """40 minutes, one 30-minute medium task due today and one 30-minute low task five days late."""
+    owner, buddy, _, scheduler = household
+    owner.available_minutes = 40
+    buddy.add_task(make_task("Medium today", "08:00", priority="medium"))
+    buddy.add_task(make_task("Low, 5 days late", "09:00", priority="low", due_date=TODAY - timedelta(days=5)))
+    return scheduler
+
+
+def test_weighted_explanation_lists_the_weighted_choice_and_what_it_left_out(household):
+    scheduler = _tight_budget_household(household)
+    lines = scheduler.explain_plan(TODAY, weighted=True).splitlines()
+    assert lines[0] == f"Plan for {TODAY}: 1 task(s), 30 of 40 available minutes used."
+    left_out = lines.index("Left out because they did not fit in the available time:")
+    chosen_lines, skipped_lines = lines[2:left_out], lines[left_out + 1:]
+    assert len(chosen_lines) == 1 and "Low, 5 days late" in chosen_lines[0] and "[score 7]" in chosen_lines[0]
+    assert len(skipped_lines) == 1 and "Medium today" in skipped_lines[0] and "[score 5]" in skipped_lines[0]
+
+
+def test_strict_explanation_for_the_same_tasks_chooses_the_other_one(household):
+    scheduler = _tight_budget_household(household)
+    lines = scheduler.explain_plan(TODAY).splitlines()
+    left_out = lines.index("Left out because they did not fit in the available time:")
+    assert "Medium today" in lines[2] and "Low, 5 days late" in lines[left_out + 1]
+
+
+def test_weighted_explanation_states_the_scoring_rule_with_its_numbers(household):
+    scheduler = _tight_budget_household(household)
+    text = scheduler.explain_plan(TODAY, weighted=True)
+    assert "priority points: high 10, medium 5, low 2; plus 1 per day overdue" in text
